@@ -15,12 +15,87 @@ class Database implements DatabaseInterface
     }
 
 
+    /**
+     * @throws Exception
+     */
     function buildQuery(string $query, array $args = []): string
     {
-        if (empty($args)) {
+        if (strpos($query, '?') === false) {
             return $query;
         }
 
+        $query = $this->parseOptionalBlock($query, $args);
+
+        $builtQuery = '';
+        $paramIndex = 0;
+        $length = strlen($query);
+
+        for ($i = 0; $i < $length; $i++) {
+            //
+            if ($query[$i] === '?') {
+                if (isset($query[$i + 1])) {
+                    $specifier = $query[$i + 1];
+                    if ($specifier !== '' && !preg_match('/[dfa# ]/', $specifier)) {
+                        throw new Exception("Invalid placeholder specifier: '$specifier' after '?'");
+                    } elseif ($specifier === 'd') {
+                        $builtQuery .= intval($args[$paramIndex++]);
+                    } elseif ($specifier === 'f') {
+                        $builtQuery .= floatval($args[$paramIndex++]);
+                    } elseif ($specifier === 'a') {
+                        if (\is_array($args[$paramIndex])) {
+                            $builtQuery = $this->implodeAssociativeArr($args[$paramIndex], $builtQuery);
+                        } else {
+                            $builtQuery .= "'" . $this->addslashes($args[$paramIndex]) . "'";
+                        }
+                        $paramIndex++;
+                    } elseif ($specifier === '#') {
+                        if (\is_array($args[$paramIndex])) {
+                            $values = [];
+                            foreach ($args[$paramIndex] as $value) {
+                                $values[] = "`$value`";
+                            }
+                            $builtQuery .= implode(', ', $values);
+                        } else {
+                            $builtQuery .= "`" . $args[$paramIndex] . "`";
+                        }
+                        $paramIndex++;
+                    } else {
+                        $builtQuery .= "'" . $this->addSlashes($args[$paramIndex++]) . "' ";
+                    }
+                    $i++;
+                } else {
+                    $builtQuery .= $query[$i];
+                }
+            } else {
+                $builtQuery .= $query[$i];
+            }
+        }
+
+        return $builtQuery;
+    }
+
+    private function addSlashes($value): string
+    {
+        $chars = ["\\", "'", "\"", "\x00", "\x1a"];
+
+        $escapedValue = '';
+        for ($i = 0; $i < strlen($value); $i++) {
+            if (in_array($value[$i], $chars)) {
+                $escapedValue .= "\\" . $value[$i];
+            } else {
+                $escapedValue .= $value[$i];
+            }
+        }
+        return $escapedValue;
+    }
+
+    public function skip(): string
+    {
+        return '~';
+    }
+    
+    private function parseOptionalBlock(string $query, array $args): string
+    {
         if (str_contains($query, '{')) {
             foreach ($args as $a) {
                 if ($a === '~') {
@@ -32,68 +107,35 @@ class Database implements DatabaseInterface
 
             $query = str_replace(['{', '}'], '', $query);
         }
-
-        $result = '';
-        $paramIndex = 0;
-        $length = strlen($query);
-
-        for ($i = 0; $i < $length; $i++) {
-
-            if ($query[$i] === '?' && isset($query[$i + 1])) {
-                switch ($query[$i + 1]) {
-                    case 'd':
-                        $result .= intval($args[$paramIndex++]);
-                        break;
-                    case 'f':
-                        $result .= floatval($args[$paramIndex++]);
-                        break;
-                    case 'a':
-                        if (is_array($args[$paramIndex])) {
-                            $array = $args[$paramIndex];
-                            if (array_values($array) === $array) {
-                                $result .= implode(', ', array_map(function($value) {
-                                    return addslashes($value);
-                                }, $array));
-                            } else {
-                                $result .= implode(', ', array_map(function($key, $value) {
-                                        if ($value) {
-                                            return "`$key` = '".addslashes($value)."'";
-                                        } else
-                                            return "`$key` = " . 'NULL';
-
-                                }, array_keys($array), $array));
-                            }
-                        } else {
-                            $result .= "'".addslashes($args[$paramIndex])."'";
-                        }
-                        $paramIndex++;
-                        break;
-                    case '#':
-                        if (is_array($args[$paramIndex])) {
-                            $result .= implode(', ', array_map(function($value) {
-                                return "`$value`";
-                            }, $args[$paramIndex]));
-                        } else {
-                            $result .= "`".$args[$paramIndex]."`";
-                        }
-                        $paramIndex++;
-                        break;
-                    default:
-                        $result .= "'".addslashes($args[$paramIndex++])."' ";
-                        break;
-                }
-                $i++;
-            } else {
-                $result .= $query[$i];
-            }
-        }
-
-        return $result;
+        
+        return $query;
     }
 
-    public function skip(): string
+    public function implodeAssociativeArr(array $args, string $builtQuery): string
     {
-        return '~';
+        $array = $args;
+        if ($this->isSimpleIndexedArray($array)) {
+            foreach ($array as $value) {
+                $builtQuery .= "" . str_replace("'", "''", $value) . ", ";
+            }
+            $builtQuery = rtrim($builtQuery, ', ');
+        } else {
+            foreach ($array as $key => $value) {
+                if ($value) {
+                    $builtQuery .= "`$key` = '" . addslashes($value) . "', ";
+                } else {
+                    $builtQuery .= "`$key` = NULL, ";
+                }
+            }
+            $builtQuery = rtrim($builtQuery, ', ');
+        }
+        return $builtQuery;
+    }
+
+    // Duck typing
+    public function isSimpleIndexedArray(array $array): bool
+    {
+        return array_values($array) === $array;
     }
 
 }
